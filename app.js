@@ -13,6 +13,70 @@ let lastPos=null, lastTime=null, lastBox=null, distanceM=0, stopStart=null, cycl
 let lastLoggedAt=0, lastLoggedDistance=0;
 let positionHistory=[], speedAvg=0;
 
+// ===== ALARMA SONORA POR ESTADO =====
+let audioCtx=null;
+let alarmInterval=null;
+let alarmState='Normal';
+let alarmMuted=false;
+
+function unlockAudio(){
+ if(!audioCtx){
+  const AudioContext=window.AudioContext||window.webkitAudioContext;
+  if(AudioContext) audioCtx=new AudioContext();
+ }
+ if(audioCtx && audioCtx.state==='suspended') audioCtx.resume();
+}
+
+function beep(frequency=900,duration=180){
+ if(alarmMuted) return;
+ unlockAudio();
+ if(!audioCtx) return;
+ const osc=audioCtx.createOscillator();
+ const gain=audioCtx.createGain();
+ osc.type='sine';
+ osc.frequency.value=frequency;
+ gain.gain.setValueAtTime(0.0001,audioCtx.currentTime);
+ gain.gain.exponentialRampToValueAtTime(0.18,audioCtx.currentTime+0.02);
+ gain.gain.exponentialRampToValueAtTime(0.0001,audioCtx.currentTime+duration/1000);
+ osc.connect(gain);
+ gain.connect(audioCtx.destination);
+ osc.start();
+ osc.stop(audioCtx.currentTime+duration/1000+0.03);
+}
+
+function stopAlarm(){
+ if(alarmInterval){clearInterval(alarmInterval);alarmInterval=null;}
+}
+
+function setAlarmByStatus(status){
+ const normalized=(status||'').toLowerCase();
+ const shouldAlarm=normalized.includes('advertencia')||normalized.includes('critico')||normalized.includes('crítico');
+ if(!shouldAlarm){stopAlarm();alarmState='Normal';return;}
+ const newState=normalized.includes('critico')||normalized.includes('crítico')?'Critico':'Advertencia';
+ if(newState===alarmState && alarmInterval) return;
+ stopAlarm();
+ alarmState=newState;
+ if(newState==='Advertencia'){
+  beep(850,160);
+  alarmInterval=setInterval(()=>beep(850,160),2000);
+ }else{
+  beep(1150,220);
+  alarmInterval=setInterval(()=>beep(1150,220),700);
+ }
+}
+
+const muteAlarmBtn=document.getElementById('muteAlarmBtn');
+const testAlarmBtn=document.getElementById('testAlarmBtn');
+if(muteAlarmBtn){
+ muteAlarmBtn.addEventListener('click',()=>{
+  alarmMuted=!alarmMuted;
+  muteAlarmBtn.textContent=alarmMuted?'Activar alarma':'Silenciar alarma';
+  if(alarmMuted) stopAlarm();
+ });
+}
+if(testAlarmBtn){testAlarmBtn.addEventListener('click',()=>beep(1000,220));}
+
+
 function el(id){return document.getElementById(id)}
 function clamp(n,min,max){return Math.max(min,Math.min(max,n))}
 function cfg(){return {realMeters:+el('realMeters').value||1,pixelMeters:+el('pixelMeters').value||120,maxSpeed:+el('maxSpeed').value||20,maxDeviation:+el('maxDeviation').value||65,maxStopTime:+el('maxStopTime').value||10,minConfidence:+el('minConfidence').value||45}}
@@ -89,6 +153,7 @@ async function loadCameras(preferredDeviceId){
 
 async function startCamera(){
  try{
+  unlockAudio();
   await loadCameras(cameraSelect.value);
   const deviceId=cameraSelect.value;
   if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}
@@ -104,7 +169,7 @@ async function startCamera(){
   alert('No se pudo iniciar la cámara seleccionada. Revisa permisos de Chrome y que Camo Studio esté abierto.');
  }
 }
-function stopCamera(){if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}}
+function stopCamera(){if(stream){stream.getTracks().forEach(t=>t.stop());stream=null} stopAlarm();}
 el('startCameraBtn').addEventListener('click',startCamera);
 el('stopCameraBtn').addEventListener('click',stopCamera);
 refreshCamerasBtn.addEventListener('click',()=>loadCameras());
@@ -256,9 +321,12 @@ function updateLiveUI(live){
  if(live.offRoute)alerts.push('Desvio de ruta');
  if(live.stoppedTooLong)alerts.push('Detencion prolongada');
  const a=el('alerts');
- if(!alerts.length){a.textContent='Operacion normal';a.className='alert ok';el('status').textContent='Normal'}
- else if(alerts.length===1){a.textContent='Advertencia: '+alerts.join(' | ');a.className='alert';el('status').textContent='Advertencia'}
- else{a.textContent='Critico: '+alerts.join(' | ');a.className='alert bad';el('status').textContent='Critico'}
+ let estado='Normal';
+ if(!alerts.length){a.textContent='Operacion normal';a.className='alert ok';estado='Normal'}
+ else if(alerts.length===1){a.textContent='Advertencia: '+alerts.join(' | ');a.className='alert';estado='Advertencia'}
+ else{a.textContent='Critico: '+alerts.join(' | ');a.className='alert bad';estado='Critico'}
+ el('status').textContent=estado;
+ setAlarmByStatus(estado);
 }
 
 function loop(){
