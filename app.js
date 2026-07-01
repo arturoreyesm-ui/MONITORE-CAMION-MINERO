@@ -6,7 +6,7 @@ const frameCtx=frameCanvas.getContext('2d',{willReadFrequently:true});
 const refInput=document.getElementById('referenceInput');
 const cameraSelect=document.getElementById('cameraSelect');
 const refreshCamerasBtn=document.getElementById('refreshCamerasBtn');
-const bundledRefs=Array.from({length:13},(_,i)=>`assets/referencias/dumper_ref_${i+1}.jpeg`);
+const bundledRefs=Array.from({length:10},(_,i)=>`assets/referencias/robot_car_ref_${i+1}.jpeg`);
 
 let stream=null, route=[], refs=[], signatureReady=false;
 let lastPos=null, lastTime=null, lastBox=null, distanceM=0, stopStart=null, cycles=0;
@@ -99,9 +99,9 @@ function renderReferenceGallery(){
 
 function buildSignature(){
  signatureReady=refs.length>0;
- el('keypointCount').textContent=signatureReady?'Color':'0';
+ el('keypointCount').textContent=signatureReady?'Color + forma':'0';
  el('signatureState').textContent=signatureReady?'Firma creada':'Sin firma';
- localStorage.setItem('dumperSignatureInfo',JSON.stringify({photos:refs.length,mode:'color-component',updated:new Date().toISOString()}));
+ localStorage.setItem('dumperSignatureInfo',JSON.stringify({photos:refs.length,mode:'robot-car-color-shape',updated:new Date().toISOString()}));
 }
 
 function loadBundledReferences(){refs=[...bundledRefs];renderReferenceGallery();buildSignature()}
@@ -178,22 +178,23 @@ el('clearRouteBtn').addEventListener('click',()=>{route=[];cycles=0;distanceM=0;
 el('saveConfigBtn').addEventListener('click',()=>{localStorage.setItem('dumperConfig',JSON.stringify(cfg()));alert('Configuracion guardada')});
 canvas.addEventListener('click',e=>{const r=canvas.getBoundingClientRect();route.push({x:(e.clientX-r.left)*canvas.width/r.width,y:(e.clientY-r.top)*canvas.height/r.height})});
 
-function isDumperYellow(r,g,b){
+
+function isRobotCarColor(r,g,b){
  const max=Math.max(r,g,b), min=Math.min(r,g,b);
- return r>150 && g>88 && b<125 && r-b>70 && g-b>30 && max-min>65 && r>=g*.82 && g>=r*.45;
+ const sat=max-min;
+ // Detector forzado para el carrito robótico real:
+ // prioriza ruedas amarillas, placa roja, placa azul y cables saturados.
+ // NO usa negro/blanco, porque eso agarraba laptop, fondo, manos y mesa.
+ const yellowWheel = r>175 && g>145 && g<235 && b<85 && r-b>95 && g-b>75 && sat>105;
+ const redDriver = r>145 && g<100 && b<105 && r-g>55 && r-b>45 && sat>85;
+ const blueBoard = b>115 && g>55 && r<115 && b-r>45 && sat>65;
+ const greenWire = g>125 && r<115 && b<130 && g-r>45 && g-b>20 && sat>65;
+ const purpleWire = b>125 && r>75 && g<115 && b-g>35 && sat>55;
+ const orangeWire = r>175 && g>75 && g<150 && b<75 && r-b>100 && sat>105;
+ return yellowWheel || redDriver || blueBoard || greenWire || purpleWire || orangeWire;
 }
 
-function findYellowComponents(){
- const sw=320, sh=240, sample=document.createElement('canvas'), sx=sample.getContext('2d',{willReadFrequently:true});
- sample.width=sw;sample.height=sh;sx.drawImage(frameCanvas,0,0,sw,sh);
- const data=sx.getImageData(0,0,sw,sh).data;
- const mask=new Uint8Array(sw*sh);
- for(let y=0;y<sh;y++){
-  for(let x=0;x<sw;x++){
-   const i=(y*sw+x)*4;
-   mask[y*sw+x]=isDumperYellow(data[i],data[i+1],data[i+2])?1:0;
-  }
- }
+function componentizeMask(mask,sw,sh,minCount=18){
  const seen=new Uint8Array(sw*sh), comps=[], qx=[], qy=[];
  for(let y=0;y<sh;y++){
   for(let x=0;x<sw;x++){
@@ -204,33 +205,70 @@ function findYellowComponents(){
    while(head<qx.length){
     const cx=qx[head],cy=qy[head++];count++;
     if(cx<minX)minX=cx;if(cx>maxX)maxX=cx;if(cy<minY)minY=cy;if(cy>maxY)maxY=cy;
-    const ns=[[cx+1,cy],[cx-1,cy],[cx,cy+1],[cx,cy-1]];
-    for(const [nx,ny] of ns){
+    for(const [nx,ny] of [[cx+1,cy],[cx-1,cy],[cx,cy+1],[cx,cy-1]]){
      if(nx<0||ny<0||nx>=sw||ny>=sh)continue;
      const ni=ny*sw+nx;
      if(mask[ni]&&!seen[ni]){seen[ni]=1;qx.push(nx);qy.push(ny)}
     }
    }
    const width=maxX-minX+1,height=maxY-minY+1,area=width*height,fill=count/Math.max(area,1),ratio=width/Math.max(height,1),areaPct=count/(sw*sh);
-   if(count>180&&areaPct>.0025&&areaPct<.22&&ratio>.9&&ratio<7&&fill>.18)comps.push({x:minX,y:minY,width,height,count,fill,ratio,areaPct});
+   if(count>=minCount) comps.push({x:minX,y:minY,width,height,count,fill,ratio,areaPct,cx:minX+width/2,cy:minY+height/2});
   }
  }
  return comps.sort((a,b)=>b.count-a.count);
 }
 
+function findTargetComponents(){
+ const sw=320, sh=240, sample=document.createElement('canvas'), sx=sample.getContext('2d',{willReadFrequently:true});
+ sample.width=sw;sample.height=sh;sx.drawImage(frameCanvas,0,0,sw,sh);
+ const data=sx.getImageData(0,0,sw,sh).data;
+ const mask=new Uint8Array(sw*sh);
+ const yellowMask=new Uint8Array(sw*sh);
+ for(let y=0;y<sh;y++){
+  for(let x=0;x<sw;x++){
+   const i=(y*sw+x)*4;
+   const r=data[i],g=data[i+1],b=data[i+2];
+   const max=Math.max(r,g,b), min=Math.min(r,g,b), sat=max-min;
+   const yellowWheel = r>175 && g>145 && g<235 && b<85 && r-b>95 && g-b>75 && sat>105;
+   if(yellowWheel) yellowMask[y*sw+x]=1;
+   if(isRobotCarColor(r,g,b)) mask[y*sw+x]=1;
+  }
+ }
+ // Se exigen ruedas amarillas como ancla principal: así no toma laptop, manos, mesa ni fondo.
+ const yellowComps=componentizeMask(yellowMask,sw,sh,18).filter(c=>c.width>4&&c.height>4&&c.count>25);
+ if(!yellowComps.length) return [];
+ let minX=sw,minY=sh,maxX=0,maxY=0,total=0;
+ yellowComps.slice(0,6).forEach(c=>{minX=Math.min(minX,c.x);minY=Math.min(minY,c.y);maxX=Math.max(maxX,c.x+c.width);maxY=Math.max(maxY,c.y+c.height);total+=c.count});
+ // Ventana alrededor de las ruedas para incorporar cables/placas sin capturar el entorno.
+ let cx=(minX+maxX)/2, cy=(minY+maxY)/2;
+ let w=Math.max(maxX-minX,45), h=Math.max(maxY-minY,32);
+ let roi={x:clamp(cx-w*.95,0,sw-1), y:clamp(cy-h*1.15,0,sh-1), width:clamp(w*1.9,30,sw), height:clamp(h*2.2,24,sh)};
+ roi.width=Math.min(roi.width,sw-roi.x); roi.height=Math.min(roi.height,sh-roi.y);
+ const comps=componentizeMask(mask,sw,sh,12).filter(c=>{
+  return c.cx>=roi.x&&c.cx<=roi.x+roi.width&&c.cy>=roi.y&&c.cy<=roi.y+roi.height;
+ });
+ if(comps.length){
+  comps.forEach(c=>{minX=Math.min(minX,c.x);minY=Math.min(minY,c.y);maxX=Math.max(maxX,c.x+c.width);maxY=Math.max(maxY,c.y+c.height);total+=c.count});
+ }
+ const bw=maxX-minX, bh=maxY-minY;
+ if(bw<20||bh<14||bw>sw*.65||bh>sh*.55) return [];
+ return [{x:minX,y:minY,width:bw,height:bh,count:total,fill:.42,ratio:bw/Math.max(bh,1),areaPct:total/(sw*sh)}];
+}
+
 function detectFrame(){
  if(!signatureReady)return null;
- const comps=findYellowComponents();
+ const comps=findTargetComponents();
  if(!comps.length){lastBox=null;return null}
- let c=comps[0];
  const sw=320, sh=240;
- let box={x:c.x-c.width*.12,y:c.y-c.height*.28,width:c.width*1.24,height:c.height*1.92};
+ const c=comps[0];
+ // Caja final: expansión controlada alrededor del carrito, no del fondo.
+ let box={x:c.x-c.width*.10,y:c.y-c.height*.28,width:c.width*1.20,height:c.height*1.58};
  box=clampBox(box,sw,sh);
  const sx=canvas.width/sw, sy=canvas.height/sh;
  box=clampBox({x:box.x*sx,y:box.y*sy,width:box.width*sx,height:box.height*sy},canvas.width,canvas.height);
  box=smoothBox(lastBox,box);
  lastBox=box;
- const confidence=clamp(48+c.areaPct*420+c.fill*28,45,96);
+ const confidence=clamp(62+c.areaPct*450+Math.min(c.count/90,20),55,96);
  return {box,confidence,estimated:false}
 }
 
@@ -341,7 +379,7 @@ function loop(){
  if(detection){
   const b=detection.box,p=boxCenter(b);
   ctx.strokeStyle='#3b82f6';ctx.lineWidth=4;ctx.strokeRect(b.x,b.y,b.width,b.height);
-  ctx.fillStyle='#3b82f6';ctx.font='18px Arial';ctx.fillText('Dumper CAT '+detection.confidence.toFixed(0)+'%',b.x,Math.max(20,b.y-8));
+  ctx.fillStyle='#3b82f6';ctx.font='18px Arial';ctx.fillText('Vehículo robótico '+detection.confidence.toFixed(0)+'%',b.x,Math.max(20,b.y-8));
   const speed=estimateMotion(p,now);
   if(route.length>1&&routeLength()>0&&distanceM/(routeLength()*mPerPx())>=1){cycles++;distanceM=0;lastLoggedDistance=0}
   const deviation=routeDeviation(p), stopped=stopStart?((now-stopStart)/1000):0;
